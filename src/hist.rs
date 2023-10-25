@@ -10,7 +10,6 @@ use crate::rows::DynamicRows;
 use crate::Attributes;
 use rgb::ComponentSlice;
 use std::collections::{HashMap, HashSet};
-use std::convert::TryInto;
 use std::fmt;
 use std::hash::Hash;
 
@@ -34,15 +33,13 @@ pub struct Histogram {
     fixed_colors: FixedColorsSet,
 
     /// maps RGBA as u32 to (boosted) count
-    hashmap: HashMap<u32, (u32, RGBA), RgbaHasher>,
-    /// how many pixels were counted
-    total_area: usize,
+    hashmap: HashMap<u32, (u32, RGBA), U32Hasher>,
 
     posterize_bits: u8,
     max_histogram_entries: u32,
 }
 
-pub(crate) type FixedColorsSet = HashSet<HashColor, RgbaHasher>;
+pub(crate) type FixedColorsSet = HashSet<HashColor, U32Hasher>;
 
 #[derive(Clone)]
 pub(crate) struct HistItem {
@@ -98,10 +95,9 @@ impl Histogram {
         Self {
             posterize_bits: attr.posterize_bits(),
             max_histogram_entries: attr.max_histogram_entries,
-            fixed_colors: HashSet::with_hasher(RgbaHasher(0)),
-            hashmap: HashMap::with_hasher(RgbaHasher(0)),
+            fixed_colors: HashSet::with_hasher(U32Hasher(0)),
+            hashmap: HashMap::with_hasher(U32Hasher(0)),
             gamma: None,
-            total_area: 0,
         }
     }
 
@@ -117,10 +113,13 @@ impl Histogram {
             image.contrast_maps()?;
         }
 
-        self.gamma = Some(image.gamma());
+        self.gamma = image.gamma();
 
-        for (idx, c) in image.fixed_colors.iter().copied().enumerate() {
-            self.fixed_colors.insert(HashColor(c, idx as _));
+        if !image.fixed_colors.is_empty() {
+            let lut = gamma_lut(self.gamma.unwrap_or(0.45455));
+            self.fixed_colors.extend(image.fixed_colors.iter().copied().enumerate().map(|(idx, c)| {
+               HashColor { px: f_pixel::from_rgba(&lut, c), index: idx as _ }
+            }));
         }
 
         if attr.progress(f32::from(attr.progress_stage1) * 0.40) {
@@ -141,6 +140,8 @@ impl Histogram {
     /// Alternative to `add_image()`. Intead of counting colors in an image, it directly takes an array of colors and their counts.
     ///
     /// This function is only useful if you already have a histogram of the image from another source.
+    ///
+    /// The gamma may be 0 to mean sRGB. All calls to `add_colors` and `add_fixed_color` should use the same gamma value.
     #[inline(never)]
     pub fn add_colors(&mut self, entries: &[HistogramEntry], gamma: f64) -> Result<(), Error> {
         if entries.is_empty() || entries.len() > 1 << 24 {
@@ -151,12 +152,14 @@ impl Histogram {
             return Err(ValueOutOfRange);
         }
 
-        self.gamma = Some(if gamma > 0. { gamma } else { 0.45455 });
+        if self.gamma.is_none() && gamma > 0. {
+            self.gamma = Some(gamma);
+        }
+
         self.reserve(entries.len());
 
-        self.total_area += entries.len();
         for e in entries {
-            self.add_color(e.color, e.count.try_into().unwrap_or(u16::MAX));
+            self.add_color(e.color, e.count);
         }
 
         Ok(())
@@ -171,7 +174,7 @@ impl Histogram {
             return Err(Unsupported);
         }
         let idx = self.fixed_colors.len();
-        self.fixed_colors.insert(HashColor(px, idx as _));
+        self.fixed_colors.insert(HashColor { px, index: idx as _ });
         Ok(())
     }
 
@@ -205,15 +208,19 @@ impl Histogram {
     }
 
     #[inline(always)]
-    fn add_color(&mut self, rgba: RGBA, boost: u16) {
+    fn add_color(&mut self, rgba: RGBA, boost: u32) {
+        if boost == 0 {
+            return;
+        }
+
         let px_int = if rgba.a != 0 {
             self.posterize_mask() & unsafe { RGBAInt { rgba }.int }
         } else { 0 };
 
         self.hashmap.entry(px_int)
             // it can overflow on images over 2^24 pixels large
-            .and_modify(move |e| e.0 = e.0.saturating_add(u32::from(boost)))
-            .or_insert((u32::from(boost), rgba));
+            .and_modify(move |e| e.0 = e.0.saturating_add(boost))
+            .or_insert((boost, rgba));
     }
 
     fn reserve(&mut self, entries: usize) {
@@ -236,7 +243,7 @@ impl Histogram {
         let new_posterize_mask = self.posterize_mask();
 
         let new_size = (self.hashmap.len()/3).max(self.hashmap.capacity()/5);
-        let old_hashmap = std::mem::replace(&mut self.hashmap, HashMap::with_capacity_and_hasher(new_size, RgbaHasher(0)));
+        let old_hashmap = std::mem::replace(&mut self.hashmap, HashMap::with_capacity_and_hasher(new_size, U32Hasher(0)));
         self.hashmap.extend(old_hashmap.into_iter().map(move |(k, v)| {
             (k & new_posterize_mask, v)
         }));
@@ -245,7 +252,6 @@ impl Histogram {
     pub(crate) fn add_pixel_rows(&mut self, image: &mut DynamicRows<'_, '_>, importance_map: Option<&[u8]>, posterize_bits: u8) -> Result<(), Error> {
         let width = image.width as usize;
         let height = image.height as usize;
-        self.total_area += width * height;
 
         let mut importance_map = importance_map.unwrap_or(&[]).chunks_exact(width).fuse();
         let image_iter = image.rgba_rows_iter()?;
@@ -255,7 +261,8 @@ impl Histogram {
             let pixels_row = &image_iter.row_rgba(&mut temp_row, row)[..width];
             let importance_map = importance_map.next().map(move |m| &m[..width]).unwrap_or(&[]);
             for (col, px) in pixels_row.iter().copied().enumerate() {
-                self.add_color(px, u16::from(importance_map.get(col).copied().unwrap_or(255)));
+                let boost = importance_map.get(col).copied().unwrap_or(255);
+                self.add_color(px, boost.into());
             }
         }
         self.init_posterize_bits(posterize_bits);
@@ -272,38 +279,29 @@ impl Histogram {
         let mut counts = [0; LIQ_MAXCLUSTER];
         let mut temp = Vec::new();
         temp.try_reserve_exact(self.hashmap.len())?;
-        // Limit perceptual weight to 1/10th of the image surface area to prevent
-        // a single color from dominating all others.
-        // total_area is 0 when using histogram.
-        let max_perceptual_weight = if self.total_area > 0 { 0.1 * self.total_area as f32 } else { f32::INFINITY };
 
         let max_fixed_color_difference = (target_mse / 2.).max(2. / 256. / 256.) as f32;
 
         let lut = gamma_lut(gamma);
 
-        let total_perceptual_weight = self.hashmap.values().map(|&(boost, color)| {
-            if boost == 0 {
-                return 0.;
-            }
-
-            let weight = (boost as f32 / 170.).min(max_perceptual_weight);
+        temp.extend(self.hashmap.values().filter_map(|&(boost, color)| {
+            let weight = boost as f32;
 
             let cluster_index = ((color.r >> 7) << 3) | ((color.g >> 7) << 2) | ((color.b >> 7) << 1) | (color.a >> 7);
             let color = f_pixel::from_rgba(&lut, color);
 
             // fixed colors are always included in the palette, so it would be wasteful to duplicate them in palette from histogram
             // FIXME: removes fixed colors from histogram (could be done better by marking them as max importance instead)
-            for HashColor(fixed, _) in &self.fixed_colors {
-                if color.diff(fixed) < max_fixed_color_difference {
-                    return 0.;
+            for HashColor { px, .. } in &self.fixed_colors {
+                if color.diff(px) < max_fixed_color_difference {
+                    return None;
                 }
             }
 
             counts[cluster_index as usize] += 1;
 
-            temp.push(TempHistItem { color, weight, cluster_index });
-            f64::from(weight)
-        }).sum::<f64>();
+            Some(TempHistItem { color, weight, cluster_index })
+        }));
 
         let mut clusters = [Cluster { begin: 0, end: 0 }; LIQ_MAXCLUSTER];
         let mut next_begin = 0;
@@ -324,14 +322,22 @@ impl Histogram {
         });
         let mut items = items.into_boxed_slice();
 
+        // Limit perceptual weight to 1/10th of the image surface area to prevent
+        // a single color from dominating all others.
+        let max_perceptual_weight = 0.1 * (temp.iter().map(|t| f64::from(t.weight)).sum::<f64>() / 256.) as f32;
+
+        let mut total_perceptual_weight = 0.;
         for temp_item in temp {
             let cluster = &mut clusters[temp_item.cluster_index as usize];
             let next_index = cluster.end as usize;
             cluster.end += 1;
 
+            let weight = (temp_item.weight * (1. / 256.)).min(max_perceptual_weight);
+            total_perceptual_weight += f64::from(weight);
+
             items[next_index].color = temp_item.color;
-            items[next_index].perceptual_weight = temp_item.weight;
-            items[next_index].adjusted_weight = temp_item.weight;
+            items[next_index].perceptual_weight = weight;
+            items[next_index].adjusted_weight = weight;
         }
 
         Ok(HistogramInternal { items, total_perceptual_weight, clusters })
@@ -368,7 +374,7 @@ pub(crate) struct Cluster {
 }
 
 // Simple deterministic hasher for the color hashmap
-impl std::hash::BuildHasher for RgbaHasher {
+impl std::hash::BuildHasher for U32Hasher {
     type Hasher = Self;
     #[inline(always)]
     fn build_hasher(&self) -> Self {
@@ -376,8 +382,8 @@ impl std::hash::BuildHasher for RgbaHasher {
     }
 }
 
-pub(crate) struct RgbaHasher(pub u32);
-impl std::hash::Hasher for RgbaHasher {
+pub(crate) struct U32Hasher(pub u32);
+impl std::hash::Hasher for U32Hasher {
     // magic constant from fxhash. For a single 32-bit key that's all it needs!
     #[inline(always)]
     fn finish(&self) -> u64 { (self.0 as u64).wrapping_mul(0x517cc1b727220a95) }
@@ -401,13 +407,13 @@ impl std::hash::Hasher for RgbaHasher {
 /// libstd's `HashSet` is afraid of NaN.
 /// contains color + original index (since hashmap forgets order)
 #[derive(PartialEq, Debug)]
-pub(crate) struct HashColor(pub f_pixel, pub u32);
+pub(crate) struct HashColor { pub px: f_pixel, pub index: PalIndex }
 
 #[allow(clippy::derived_hash_with_manual_eq)]
 impl Hash for HashColor {
     #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        for c in self.0.as_slice() {
+        for c in self.px.as_slice() {
             u32::from_ne_bytes(c.to_ne_bytes()).hash(state);
         }
     }
