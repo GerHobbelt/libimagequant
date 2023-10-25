@@ -1,7 +1,7 @@
 use crate::attr::Attributes;
 use crate::blur::{liq_blur, liq_max3, liq_min3};
 use crate::error::*;
-use crate::pal::{f_pixel, PalF, PalIndex, MAX_COLORS, MIN_OPAQUE_A, RGBA};
+use crate::pal::{f_pixel, PalF, PalIndexRemap, MAX_COLORS, MIN_OPAQUE_A, RGBA};
 use crate::remap::DitherMapMode;
 use crate::rows::{DynamicRows, PixelsSource};
 use crate::seacow::Pointer;
@@ -71,7 +71,7 @@ impl<'pixels> Image<'pixels> {
     }
 
     pub(crate) fn free_histogram_inputs(&mut self) {
-        self.importance_map = None;
+        // importance_map must stay for remapping, because remap performs kmeans on potentially-unimportant pixels
         self.px.free_histogram_inputs();
     }
 
@@ -123,7 +123,7 @@ impl<'pixels> Image<'pixels> {
         true
     }
 
-    pub(crate) fn update_dither_map(&mut self, remapped_image: &RowBitmap<'_, PalIndex>, palette: &PalF, uses_background: bool) -> Result<(), Error> {
+    pub(crate) fn update_dither_map(&mut self, remapped_image: &RowBitmap<'_, PalIndexRemap>, palette: &PalF, uses_background: bool) -> Result<(), Error> {
         if self.edges.is_none() {
             self.contrast_maps()?;
         }
@@ -178,7 +178,11 @@ impl<'pixels> Image<'pixels> {
     ///
     /// The map must be `width`×`height` pixels large. Higher numbers = more important.
     pub fn set_importance_map(&mut self, map: impl Into<Box<[u8]>>) -> Result<(), Error> {
-        self.importance_map = Some(map.into());
+        let map = map.into();
+        if map.len() != self.width() * self.height() {
+            return Err(BufferTooSmall);
+        }
+        self.importance_map = Some(map);
         Ok(())
     }
 

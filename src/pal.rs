@@ -200,11 +200,18 @@ impl PalPop {
     }
 }
 
-/// This could be increased to support > 256 colors
+#[cfg(feature = "large_palettes")]
+pub type PalIndex = u16;
+
+#[cfg(not(feature = "large_palettes"))]
 pub type PalIndex = u8;
+
+/// This could be increased to support > 256 colors in remapping too
+pub type PalIndexRemap = u8;
 pub type PalLen = u16;
 
-pub(crate) const MAX_COLORS: usize = 256;
+/// Palettes are stored on the stack, and really large ones will cause stack overflows
+pub(crate) const MAX_COLORS: usize = if PalIndex::MAX == 255 { 256 } else { 2048 };
 
 /// A palette of premultiplied ARGB 4xf32 colors in internal gamma
 #[derive(Clone)]
@@ -252,7 +259,7 @@ impl PalF {
         }
 
         // if using low quality, there's a chance mediancut won't create enough colors in the palette
-        let max_fixed_colors = fixed_colors.len().min(max_colors.into());
+        let max_fixed_colors = fixed_colors.len().min(max_colors as usize);
         if self.len() < max_fixed_colors {
             let needs_extra = max_fixed_colors - self.len();
             self.colors.extend(fixed_colors.iter().copied().take(needs_extra));
@@ -265,7 +272,7 @@ impl PalF {
         for (i, fixed_color) in fixed_colors.iter().enumerate().take(self.len()) {
             let (best_idx, _) = self.colors.iter().enumerate().skip(i).min_by_key(|(_, pal_color)| {
                 // not using Nearest, because creation of the index may take longer than naive search once
-                OrdFloat::<f32>::unchecked_new(pal_color.diff(fixed_color))
+                OrdFloat::new(pal_color.diff(fixed_color))
             }).expect("logic bug in fixed colors, please report a bug");
             debug_assert!(best_idx >= i);
             self.swap(i, best_idx);
@@ -338,7 +345,7 @@ pub fn gamma_lut(gamma: f64) -> [f32; 256] {
 #[repr(C)]
 pub struct Palette {
     /// Number of used colors in the `entries`
-    pub count: u32,
+    pub count: std::os::raw::c_uint,
     /// The colors, up to `count`
     pub entries: [RGBA; MAX_COLORS],
 }
@@ -422,5 +429,16 @@ fn pal_test() {
         let rgba = p.as_slice()[i as usize].to_rgb(0.45455);
         assert_eq!(rgba, RGBA::new(i, i, i, 100 + i / 2));
         assert_eq!(int_pal[i as usize], RGBA::new(i, i, i, 100 + i / 2));
+    }
+}
+
+#[test]
+#[cfg(feature = "large_palettes")]
+fn largepal() {
+    let gamma = gamma_lut(0.5);
+    let mut p = PalF::new();
+    for i in 0..1000 {
+        let rgba = RGBA::new(i as u8, (i/2) as u8, (i/4) as u8, 255);
+        p.push(f_pixel::from_rgba(&gamma, rgba), PalPop::new(1.));
     }
 }
