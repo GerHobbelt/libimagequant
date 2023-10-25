@@ -22,13 +22,12 @@ static: $(STATICLIB)
 
 java: $(JNILIB)
 
-target:: Cargo.toml
+$(STATICLIB): Cargo.toml
 	cargo build --release
-
-$(STATICLIB): target
-	cp target/release/$(STATICLIB) $(STATICLIB)
+	cp ../target/release/libimagequant_sys.a $(STATICLIB)
 
 $(JNILIB): $(JAVAHEADERS) $(STATICLIB) org/pngquant/PngQuant.c
+	# You may need to set LDFLAGS env var. See: cargo rustc -- --print native-static-libs
 	$(CC) -g $(CFLAGS) $(LDFLAGS) $(JAVAINCLUDE) -shared -o $@ org/pngquant/PngQuant.c $(STATICLIB)
 
 $(JAVACLASSES): %.class: %.java
@@ -38,7 +37,10 @@ $(JAVAHEADERS): %.h: %.class
 	javah -o $@ $(subst /,., $(patsubst %.class,%,$<)) && touch $@
 
 example: example.c lodepng.h lodepng.c $(STATICLIB)
-	$(CC) -g $(CFLAGS) -Wall example.c $(STATICLIB) -lm -o example
+	# remove -lpthread on Windows
+	# add -ldl on Linux
+	# You may need to set LDFLAGS env var. See: cargo rustc -- --print native-static-libs
+	$(CC) -g $(CFLAGS) -Wall example.c $(STATICLIB) -lm -lpthread $(LDFLAGS) -o example
 
 lodepng.h:
 	curl -o lodepng.h -L https://raw.githubusercontent.com/lvandeve/lodepng/master/lodepng.h
@@ -49,7 +51,7 @@ lodepng.c:
 clean:
 	rm -f $(SHAREDLIBVER) $(SHAREDLIB) $(STATICLIB)
 	rm -f $(JAVAHEADERS) $(JAVACLASSES) $(JNILIB) example
-	rm -rf target
+	rm -rf ../target
 
 distclean: clean
 	rm -f imagequant.pc
@@ -71,5 +73,5 @@ uninstall:
 $(PKGCONFIG): Cargo.toml
 	sed 's|@PREFIX@|$(PREFIX)|;s|@VERSION@|$(VERSION)|' < imagequant.pc.in > $(PKGCONFIG)
 
-.PHONY: all static clean distclean java target
+.PHONY: all static clean distclean java
 .DELETE_ON_ERROR:
