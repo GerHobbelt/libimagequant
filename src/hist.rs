@@ -49,6 +49,7 @@ pub(crate) struct HistItem {
     pub color: f_pixel,
     pub adjusted_weight: f32,
     pub perceptual_weight: f32,
+    /// temporary in median cut
     pub mc_color_weight: f32,
     pub tmp: HistSortTmp,
 }
@@ -210,7 +211,8 @@ impl Histogram {
         } else { 0 };
 
         self.hashmap.entry(px_int)
-            .and_modify(move |e| e.0 += u32::from(boost))
+            // it can overflow on images over 2^24 pixels large
+            .and_modify(move |e| e.0 = e.0.saturating_add(u32::from(boost)))
             .or_insert((u32::from(boost), rgba));
     }
 
@@ -272,23 +274,21 @@ impl Histogram {
         temp.try_reserve_exact(self.hashmap.len())?;
         // Limit perceptual weight to 1/10th of the image surface area to prevent
         // a single color from dominating all others.
-        let max_perceptual_weight = 0.1 * self.total_area as f32;
+        // total_area is 0 when using histogram.
+        let max_perceptual_weight = if self.total_area > 0 { 0.1 * self.total_area as f32 } else { f32::INFINITY };
 
         let max_fixed_color_difference = (target_mse / 2.).max(2. / 256. / 256.) as f32;
 
         let lut = gamma_lut(gamma);
 
         let total_perceptual_weight = self.hashmap.values().map(|&(boost, color)| {
-            if boost == 0 && !temp.is_empty() {
+            if boost == 0 {
                 return 0.;
             }
-            let cluster_index = ((color.r >> 7) << 3) | ((color.g >> 7) << 2) | ((color.b >> 7) << 1) | (color.a >> 7);
 
             let weight = (boost as f32 / 170.).min(max_perceptual_weight);
-            if weight == 0. {
-                return 0.;
-            }
 
+            let cluster_index = ((color.r >> 7) << 3) | ((color.g >> 7) << 2) | ((color.b >> 7) << 1) | (color.a >> 7);
             let color = f_pixel::from_rgba(&lut, color);
 
             // fixed colors are always included in the palette, so it would be wasteful to duplicate them in palette from histogram
@@ -320,7 +320,7 @@ impl Histogram {
             adjusted_weight: if cfg!(debug_assertions) { f32::NAN } else { 0. },
             perceptual_weight: if cfg!(debug_assertions) { f32::NAN } else { 0. },
             mc_color_weight: if cfg!(debug_assertions) { f32::NAN } else { 0. },
-            tmp: HistSortTmp { mc_sort_value: 0 },
+            tmp: HistSortTmp { mc_sort_value: if cfg!(debug_assertions) { !0 } else { 0 } },
         });
         let mut items = items.into_boxed_slice();
 
