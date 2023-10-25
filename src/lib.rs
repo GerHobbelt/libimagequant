@@ -245,7 +245,7 @@ pub fn _unstable_internal_kmeans_bench() -> impl FnMut() {
     }).collect::<Vec<_>>();
 
     h.add_colors(&e, 0.).unwrap();
-    let mut hist = h.finalize_builder(0.45455, 0.).unwrap();
+    let mut hist = h.finalize_builder(0.45455).unwrap();
 
     let lut = pal::gamma_lut(0.45455);
     let mut p = PalF::new();
@@ -272,3 +272,28 @@ impl<T> PushInCapacity<T> for Vec<T> {
         }
     }
 }
+
+#[test]
+fn test_fixed_colors() {
+    let attr = Attributes::new();
+    let mut h = Histogram::new(&attr);
+    let tmp = (0..128).map(|c| HistogramEntry {
+        color: RGBA::new(c,c,c,255),
+        count: 1,
+    }).collect::<Vec<_>>();
+    h.add_colors(&tmp, 0.).unwrap();
+    for f in 200..255 {
+        h.add_fixed_color(RGBA::new(f,f,f,255), 0.).unwrap();
+    }
+    let mut r = h.quantize(&attr).unwrap();
+    let pal = r.palette();
+
+    for (i, c) in (200..255).enumerate() {
+        assert_eq!(pal[i], RGBA::new(c,c,c,255));
+    }
+
+    for c in 0..128 {
+        assert!(pal[55..].iter().any(|&p| p == RGBA::new(c,c,c,255)));
+    }
+}
+

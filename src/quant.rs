@@ -1,6 +1,6 @@
 use crate::attr::{Attributes, ControlFlow};
 use crate::error::*;
-use crate::hist::{FixedColorsSet, HistogramInternal};
+use crate::hist::HistogramInternal;
 use crate::image::Image;
 use crate::kmeans::Kmeans;
 use crate::mediancut::mediancut;
@@ -29,10 +29,10 @@ pub struct QuantizationResult {
 }
 
 impl QuantizationResult {
-    pub(crate) fn new(attr: &Attributes, hist: HistogramInternal, freeze_result_colors: bool, fixed_colors: &FixedColorsSet, gamma: f64) -> Result<Self, Error> {
+    pub(crate) fn new(attr: &Attributes, hist: HistogramInternal, freeze_result_colors: bool, gamma: f64) -> Result<Self, Error> {
         if attr.progress(f32::from(attr.progress_stage1)) { return Err(Aborted); }
         let (max_mse, target_mse, target_mse_is_zero) = attr.target_mse(hist.items.len());
-        let (mut palette, palette_error) = find_best_palette(attr, target_mse, target_mse_is_zero, max_mse, hist, fixed_colors)?;
+        let (mut palette, palette_error) = find_best_palette(attr, target_mse, target_mse_is_zero, max_mse, hist)?;
         if freeze_result_colors {
             palette.iter_mut().for_each(|(_, p)| *p = p.to_fixed());
         }
@@ -88,11 +88,13 @@ impl QuantizationResult {
         }
 
         let mut palette = self.palette.clone();
-        self.remapped = Some(Box::new(if self.dither_level == 0. {
-            Remapped {
-                int_palette: palette.make_int_palette(self.gamma, self.min_posterization_output),
-                palette_error: Some(remap_to_palette(&mut image.px, image.background.as_deref_mut(), &mut output_pixels, &mut palette)?.0),
-            }
+        let mut remapped = Box::new(Remapped {
+            int_palette: Palette { count: 0, entries: [Default::default(); MAX_COLORS] },
+            palette_error: None,
+        });
+        if self.dither_level == 0. {
+            palette.init_int_palette(&mut remapped.int_palette, self.gamma, self.min_posterization_output);
+            remapped.palette_error = Some(remap_to_palette(&mut image.px, image.background.as_deref_mut(), &mut output_pixels, &mut palette)?.0);
         } else {
             let uses_background = image.background.is_some();
             let dither_map_error = Self::optionally_generate_dither_map(self.use_dither_map, image, uses_background, &mut output_pixels, &mut palette)?;
@@ -104,11 +106,12 @@ impl QuantizationResult {
             let palette_error = dither_map_error.or(self.palette_error);
 
             // remapping above was the last chance to do K-Means iteration, hence the final palette is set after remapping
-            let int_palette = palette.make_int_palette(self.gamma, self.min_posterization_output);
+            palette.init_int_palette(&mut remapped.int_palette, self.gamma, self.min_posterization_output);
+            remapped.palette_error = palette_error;
             let max_dither_error = (palette_error.unwrap_or(quality_to_mse(80)) * 2.4).max(quality_to_mse(35)) as f32;
             remap_to_palette_floyd(image, output_pixels, &palette, self, max_dither_error, output_image_is_remapped)?;
-            Remapped { int_palette, palette_error }
-        }));
+        }
+        self.remapped = Some(remapped);
         Ok(())
     }
 
@@ -202,7 +205,7 @@ impl QuantizationResult {
             }
             None => {
                 if self.int_palette.count == 0 {
-                    self.int_palette = self.palette.make_int_palette(self.gamma, self.min_posterization_output);
+                    self.palette.init_int_palette(&mut self.int_palette, self.gamma, self.min_posterization_output);
                 }
                 &self.int_palette
             },
@@ -326,11 +329,12 @@ impl fmt::Debug for QuantizationResult {
 ///
 ///  `feedback_loop_trials` controls how long the search will take. < 0 skips the iteration.
 #[allow(clippy::or_fun_call)]
-pub(crate) fn find_best_palette(attr: &Attributes, target_mse: f64, target_mse_is_zero: bool, max_mse: Option<f64>, mut hist: HistogramInternal, fixed_colors: &FixedColorsSet) -> Result<(PalF, Option<f64>), Error> {
-    let few_input_colors = hist.items.len() + fixed_colors.len() <= attr.max_colors as usize;
+pub(crate) fn find_best_palette(attr: &Attributes, target_mse: f64, target_mse_is_zero: bool, max_mse: Option<f64>, mut hist: HistogramInternal) -> Result<(PalF, Option<f64>), Error> {
+    // hist.items includes fixed colors already
+    let few_input_colors = hist.items.len() <= attr.max_colors as usize;
     // actual target_mse passed to this method has extra diff from posterization
     if few_input_colors && target_mse_is_zero {
-        return Ok(palette_from_histogram(&hist, attr.max_colors, fixed_colors));
+        return Ok(palette_from_histogram(&hist, attr.max_colors));
     }
 
     let mut max_colors = attr.max_colors;
@@ -342,8 +346,8 @@ pub(crate) fn find_best_palette(attr: &Attributes, target_mse: f64, target_mse_i
     let mut palette_error = None;
     let mut palette = loop {
         let max_mse_per_color = target_mse.max(palette_error.unwrap_or(quality_to_mse(1))).max(quality_to_mse(51)) * 1.2;
-        let mut new_palette = mediancut(&mut hist, max_colors - fixed_colors.len() as PalLen, target_mse * target_mse_overshoot, max_mse_per_color)?
-            .with_fixed_colors(max_colors, fixed_colors);
+        let mut new_palette = mediancut(&mut hist, max_colors, target_mse * target_mse_overshoot, max_mse_per_color)?
+            .with_fixed_colors(attr.max_colors, &hist.fixed_colors);
 
         let stage_done = 1. - (f32::from(trials_left.max(0)) / f32::from(total_trials + 1)).powi(2);
         let overall_done = f32::from(attr.progress_stage1) + stage_done * f32::from(attr.progress_stage2);
@@ -407,13 +411,13 @@ fn refine_palette(palette: &mut PalF, attr: &Attributes, hist: &mut HistogramInt
 }
 
 #[cold]
-fn palette_from_histogram(hist: &HistogramInternal, max_colors: PalLen, fixed_colors: &FixedColorsSet) -> (PalF, Option<f64>) {
+fn palette_from_histogram(hist: &HistogramInternal, max_colors: PalLen) -> (PalF, Option<f64>) {
     let mut hist_pal = PalF::new();
     for item in hist.items.iter() {
         hist_pal.push(item.color, PalPop::new(item.perceptual_weight));
     }
 
-    (hist_pal.with_fixed_colors(max_colors, fixed_colors), Some(0.))
+    (hist_pal.with_fixed_colors(max_colors, &hist.fixed_colors), Some(0.))
 }
 
 pub(crate) fn quality_to_mse(quality: u8) -> f64 {
