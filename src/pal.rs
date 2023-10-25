@@ -176,10 +176,11 @@ pub(crate) struct PalPop(f32);
 
 impl PalPop {
     #[inline(always)]
-    pub fn is_fixed(&self) -> bool {
+    pub fn is_fixed(self) -> bool {
         self.0 < 0.
     }
 
+    #[must_use]
     pub fn to_fixed(self) -> Self {
         if self.0 < 0. {
             return self;
@@ -195,7 +196,8 @@ impl PalPop {
     }
 
     #[inline(always)]
-    pub fn popularity(&self) -> f32 {
+    #[must_use]
+    pub fn popularity(self) -> f32 {
         self.0.abs()
     }
 }
@@ -421,7 +423,7 @@ fn pal_test() {
 
     let mut int_pal = Palette {
         count: 0,
-        entries: [Default::default(); MAX_COLORS],
+        entries: [RGBA::default(); MAX_COLORS],
     };
     p.init_int_palette(&mut int_pal, 0.45455, 0);
 

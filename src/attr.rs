@@ -249,6 +249,7 @@ impl Attributes {
 
     // true == abort
     #[inline]
+    #[must_use]
     pub(crate) fn progress(self: &Attributes, percent: f32) -> bool {
         if let Some(f) = &self.progress_callback {
             f(percent) == ControlFlow::Break
@@ -261,7 +262,7 @@ impl Attributes {
     pub(crate) fn verbose_print(self: &Attributes, msg: impl AsRef<str>) {
         fn _print(a: &Attributes, msg: &str) {
             if let Some(f) = &a.log_callback {
-                f(a, msg)
+                f(a, msg);
             }
         }
         _print(self, msg.as_ref());
@@ -270,10 +271,11 @@ impl Attributes {
     #[inline]
     pub(crate) fn verbose_printf_flush(self: &Attributes) {
         if let Some(f) = &self.log_flush_callback {
-            f(self)
+            f(self);
         }
     }
 
+    #[must_use]
     pub(crate) fn feedback_loop_trials(&self, hist_items: usize) -> u16 {
         let mut feedback_loop_trials = self.feedback_loop_trials;
         if hist_items > 5000 {
@@ -303,6 +305,7 @@ impl Attributes {
     }
 
     /// returns iterations, `iteration_limit`
+    #[must_use]
     pub(crate) fn kmeans_iterations(&self, hist_items_len: usize, palette_error_is_known: bool) -> (u16, f64) {
         let mut iteration_limit = self.kmeans_iteration_limit;
         let mut iterations = self.kmeans_iterations;
@@ -326,6 +329,7 @@ impl Attributes {
     }
 
     #[inline]
+    #[must_use]
     pub(crate) fn posterize_bits(&self) -> u8 {
         self.min_posterization_output.max(self.min_posterization_input)
     }

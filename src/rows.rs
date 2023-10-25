@@ -31,37 +31,36 @@ pub(crate) struct DynamicRowsIter<'parent, 'pixels, 'rows> {
 }
 
 impl<'a, 'pixels, 'rows> DynamicRowsIter<'a, 'pixels, 'rows> {
+    #[must_use]
     pub fn row_f<'px>(&'px mut self, temp_row: &mut [MaybeUninit<RGBA>], row: usize) -> &'px [f_pixel] {
         debug_assert_eq!(temp_row.len(), self.px.width as usize);
-        match self.px.f_pixels.as_ref() {
-            Some(pixels) => {
-                let start = self.px.width as usize * row;
-                &pixels[start..start + self.px.width as usize]
-            },
-            None => {
-                let lut = gamma_lut(self.px.gamma);
-                let row_pixels = self.px.row_rgba(temp_row, row);
+        if let Some(pixels) = self.px.f_pixels.as_ref() {
+            let start = self.px.width as usize * row;
+            &pixels[start..start + self.px.width as usize]
+        } else {
+            let lut = gamma_lut(self.px.gamma);
+            let row_pixels = self.px.row_rgba(temp_row, row);
 
-                match self.temp_f_row.as_mut() {
-                    Some(t) => DynamicRows::convert_row_to_f(t, row_pixels, &lut),
-                    None => &mut [], // this can't happen
-                }
-            },
+            match self.temp_f_row.as_mut() {
+                Some(t) => DynamicRows::convert_row_to_f(t, row_pixels, &lut),
+                None => &mut [], // this can't happen
+            }
         }
     }
 
+    #[must_use]
     pub fn row_f_shared<'px>(&'px self, temp_row: &mut [MaybeUninit<RGBA>], temp_row_f: &'px mut [MaybeUninit<f_pixel>], row: usize) -> &'px [f_pixel] {
-        match self.px.f_pixels.as_ref() {
-            Some(pixels) => &pixels[self.px.width as usize * row..],
-            None => {
-                let lut = gamma_lut(self.px.gamma);
-                let row_pixels = self.px.row_rgba(temp_row, row);
+        if let Some(pixels) = self.px.f_pixels.as_ref() {
+            &pixels[self.px.width as usize * row..]
+        } else {
+            let lut = gamma_lut(self.px.gamma);
+            let row_pixels = self.px.row_rgba(temp_row, row);
 
-                DynamicRows::convert_row_to_f(temp_row_f, row_pixels, &lut)
-            },
+            DynamicRows::convert_row_to_f(temp_row_f, row_pixels, &lut)
         }
     }
 
+    #[must_use]
     pub fn row_rgba<'px>(&'px self, temp_row: &'px mut [MaybeUninit<RGBA>], row: usize) -> &'px [RGBA] {
         self.px.row_rgba(temp_row, row)
     }
@@ -96,6 +95,7 @@ impl<'pixels,'rows> DynamicRows<'pixels,'rows> {
         unsafe { slice_assume_init_mut(row_f_pixels) }
     }
 
+    #[must_use]
     fn should_use_low_memory(&self) -> bool {
         self.width() * self.height() > LIQ_HIGH_MEMORY_LIMIT / std::mem::size_of::<f_pixel>()
     }
@@ -197,11 +197,13 @@ impl<'pixels,'rows> DynamicRows<'pixels,'rows> {
     }
 
     #[inline(always)]
+    #[must_use]
     pub fn width(&self) -> usize {
         self.width as usize
     }
 
     #[inline(always)]
+    #[must_use]
     pub fn height(&self) -> usize {
         self.height as usize
     }
@@ -231,5 +233,5 @@ unsafe fn box_assume_init<T>(s: Box<[MaybeUninit<T>]>) -> Box<[T]> {
 
 #[inline(always)]
 unsafe fn slice_assume_init_mut<T>(s: &mut [MaybeUninit<T>]) -> &mut [T] {
-    std::mem::transmute(s)
+    &mut *(s as *mut [MaybeUninit<T>] as *mut [T])
 }
