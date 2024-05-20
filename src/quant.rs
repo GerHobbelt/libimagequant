@@ -87,6 +87,8 @@ impl QuantizationResult {
             return Err(Error::Aborted);
         }
 
+        image.free_histogram_inputs();
+
         let mut palette = self.palette.clone();
         let mut remapped = Box::new(Remapped {
             int_palette: Palette { count: 0, entries: [RGBA::default(); MAX_COLORS] },
@@ -279,9 +281,17 @@ impl QuantizationResult {
     pub fn palette_vec(&mut self) -> Vec<RGBA> {
         let pal = self.palette();
         let mut out: Vec<RGBA> = Vec::new();
-        out.try_reserve_exact(pal.len()).expect("OOM");
-        out.extend_from_slice(pal);
+        if out.try_reserve_exact(pal.len()).is_ok() {
+            out.extend_from_slice(pal);
+        }
         out
+    }
+
+    /// Expected length of the palette
+    ///
+    /// Reads the length without finalizing the colors
+    pub fn palette_len(&mut self) -> usize {
+        self.palette.len()
     }
 }
 
