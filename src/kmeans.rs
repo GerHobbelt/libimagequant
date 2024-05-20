@@ -1,3 +1,4 @@
+use crate::CacheLineAlign;
 use crate::hist::{HistItem, HistogramInternal};
 use crate::nearest::Nearest;
 use crate::pal::{f_pixel, PalF, PalIndex, PalPop};
@@ -7,6 +8,8 @@ use rgb::alt::ARGB;
 use rgb::ComponentMap;
 use std::cell::RefCell;
 
+/// K-Means iteration: new palette color is computed from weighted average of colors that map best to that palette entry.
+// avoid false sharing
 pub(crate) struct Kmeans {
     averages: Vec<ColorAvg>,
     weighed_diff_sum: f64,
@@ -18,7 +21,6 @@ struct ColorAvg {
     pub total: f64,
 }
 
-/// K-Means iteration: new palette color is computed from weighted average of colors that map best to that palette entry.
 impl Kmeans {
     #[inline]
     pub fn new(pal_len: usize) -> Result<Self, Error> {
@@ -65,15 +67,15 @@ impl Kmeans {
         // chunk size is a trade-off between parallelization and overhead
         hist.items.par_chunks_mut(256).for_each({
             let tls = &tls; move |batch| {
-            let kmeans = tls.get_or(move || RefCell::new(Kmeans::new(len)));
-            if let Ok(ref mut kmeans) = *kmeans.borrow_mut() {
+            let kmeans = tls.get_or(move || CacheLineAlign(RefCell::new(Self::new(len))));
+            if let Ok(ref mut kmeans) = *kmeans.0.borrow_mut() {
                 kmeans.iterate_batch(batch, &n, colors, adjust_weight);
             }
         }});
 
         let diff = tls.into_iter()
-            .map(RefCell::into_inner)
-            .reduce(Kmeans::try_merge)
+            .map(|c| c.0.into_inner())
+            .reduce(Self::try_merge)
             .transpose()?
             .map_or(0., |kmeans| {
                 kmeans.finalize(palette) / total
@@ -92,7 +94,7 @@ impl Kmeans {
                 let remapped = colors[matched as usize];
                 let (_, new_diff) = n.search(&f_pixel(px.0 + px.0 - remapped.0), matched);
                 diff = new_diff;
-                item.adjusted_weight = (item.perceptual_weight + 2. * item.adjusted_weight) * (0.5 + diff);
+                item.adjusted_weight = 2.0f32.mul_add(item.adjusted_weight, item.perceptual_weight) * (0.5 + diff);
             }
             debug_assert!(f64::from(diff) < 1e20);
             self.update_color(px, item.adjusted_weight, matched);
@@ -101,7 +103,7 @@ impl Kmeans {
     }
 
     #[inline]
-    pub fn merge(mut self, new: Kmeans) -> Kmeans {
+    pub fn merge(mut self, new: Self) -> Self {
         self.weighed_diff_sum += new.weighed_diff_sum;
         self.averages.iter_mut().zip(new.averages).for_each(|(p, n)| {
             p.sum += n.sum;
@@ -113,7 +115,7 @@ impl Kmeans {
     #[inline]
     pub fn try_merge<E>(old: Result<Self, E>, new: Result<Self, E>) -> Result<Self, E> {
         match (old, new) {
-            (Ok(old), Ok(new)) => Ok(Kmeans::merge(old, new)),
+            (Ok(old), Ok(new)) => Ok(Self::merge(old, new)),
             (Err(e), _) | (_, Err(e)) => Err(e),
         }
     }

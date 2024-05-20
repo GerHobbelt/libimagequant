@@ -1,3 +1,4 @@
+use crate::CacheLineAlign;
 use crate::error::Error;
 use crate::image::Image;
 use crate::kmeans::Kmeans;
@@ -18,6 +19,7 @@ pub enum DitherMapMode {
     Always = 2,
 }
 
+#[derive(Clone)]
 pub(crate) struct Remapped {
     pub(crate) int_palette: Palette,
     pub(crate) palette_error: Option<f64>,
@@ -34,10 +36,10 @@ pub(crate) fn remap_to_palette<'x, 'b: 'x>(px: &mut DynamicRows, background: Opt
 
     let tls = ThreadLocal::new();
     let width = px.width as usize;
-    let per_thread_buffers = move || -> Result<_, Error> { Ok(RefCell::new((Kmeans::new(palette_len)?, temp_buf(width)?, temp_buf(width)?, temp_buf(width)?))) };
+    let per_thread_buffers = move || -> Result<_, Error> { Ok(CacheLineAlign(RefCell::new((Kmeans::new(palette_len)?, temp_buf(width)?, temp_buf(width)?, temp_buf(width)?)))) };
 
     let tls_tmp1 = tls.get_or_try(per_thread_buffers)?;
-    let mut tls_tmp = tls_tmp1.borrow_mut();
+    let mut tls_tmp = tls_tmp1.0.borrow_mut();
 
     let input_rows = px.rows_iter(&mut tls_tmp.1)?;
     let (background, transparent_index) = background.map(|background| {
@@ -59,7 +61,7 @@ pub(crate) fn remap_to_palette<'x, 'b: 'x>(px: &mut DynamicRows, background: Opt
             Ok(res) => res,
             Err(_) => return f64::NAN,
         };
-        let (kmeans, temp_row, temp_row_f, temp_row_f_bg) = &mut *tls_res.borrow_mut();
+        let (kmeans, temp_row, temp_row_f, temp_row_f_bg) = &mut *tls_res.0.borrow_mut();
 
         let output_pixels_row = &mut output_pixels_row[..width];
         let importance_map = importance_map.and_then(|m| m.get(row * width..)).unwrap_or(&[]);
@@ -95,7 +97,7 @@ pub(crate) fn remap_to_palette<'x, 'b: 'x>(px: &mut DynamicRows, background: Opt
     }
 
     if let Some(kmeans) = tls.into_iter()
-        .map(|t| RefCell::into_inner(t).0)
+        .map(|t| t.0.into_inner().0)
         .reduce(Kmeans::merge) { kmeans.finalize(palette); }
 
     let remapping_error = remapping_error / f64::from(px.width * px.height);
@@ -105,7 +107,7 @@ pub(crate) fn remap_to_palette<'x, 'b: 'x>(px: &mut DynamicRows, background: Opt
 fn get_dithered_pixel(dither_level: f32, max_dither_error: f32, thiserr: f_pixel, px: f_pixel) -> f_pixel {
     let s = thiserr.0 * dither_level;
     // This prevents gaudy green pixels popping out of the blue (or red or black! ;)
-    let dither_error = s.r * s.r + s.g * s.g + s.b * s.b + s.a * s.a;
+    let dither_error = s.r.mul_add(s.r, s.g * s.g) + s.b.mul_add(s.b, s.a * s.a);
     if dither_error < 2. / 256. / 256. {
         // don't dither areas that don't have noticeable error — makes file smaller
         return px;
@@ -135,9 +137,9 @@ fn get_dithered_pixel(dither_level: f32, max_dither_error: f32, thiserr: f_pixel
     }
     f_pixel(ARGBF {
         a: (px.a + s.a).clamp(0., 1.),
-        r: px.r + s.r * ratio,
-        g: px.g + s.g * ratio,
-        b: px.b + s.b * ratio,
+        r: s.r.mul_add(ratio, px.r),
+        g: s.g.mul_add(ratio, px.g),
+        b: s.b.mul_add(ratio, px.b),
     })
 }
 
@@ -172,7 +174,7 @@ pub(crate) fn remap_to_palette_floyd(input_image: &mut Image, mut output_pixels:
         background = None;
     }
     // response to this value is non-linear and without it any value < 0.8 would give almost no dithering
-    let mut base_dithering_level = (1. - (1. - quant.dither_level) * (1. - quant.dither_level)) * (15. / 16.); // prevent small errors from accumulating
+    let mut base_dithering_level = (1. - quant.dither_level).mul_add(-(1. - quant.dither_level), 1.) * (15. / 16.); // prevent small errors from accumulating
     if !dither_map.is_empty() {
         base_dithering_level *= 1. / 255.; // dither_map is in 0-255 scale
     }
@@ -187,11 +189,11 @@ pub(crate) fn remap_to_palette_floyd(input_image: &mut Image, mut output_pixels:
 
     // Chunks have overhead, so should be big (more than 2 bring diminishing results). Chunks risk causing seams, so should be tall.
     let num_chunks = if quant.single_threaded_dithering { 1 } else { (width * height / 524_288).min(height / 128).max(if height > 128 {2} else {1}).min(num_cpus()) };
-    let chunks = output_pixels.chunks((height + num_chunks - 1) / num_chunks);
+    let chunks = output_pixels.chunks((height + num_chunks - 1) / num_chunks).map(CacheLineAlign);
     scope(move |s| {
         let mut chunk_start_row = 0;
         for mut chunk in chunks {
-            let chunk_len = chunk.len();
+            let chunk_len = chunk.0.len();
             let mut temp_row = temp_buf(width)?;
             let mut input_image_iter = input_image_px.rows_iter_prepared()?;
             let mut background = background.map(|bg| bg.rows_iter_prepared()).transpose()?;
@@ -217,7 +219,7 @@ pub(crate) fn remap_to_palette_floyd(input_image: &mut Image, mut output_pixels:
                 return Err(Error::Aborted);
             }
             s.spawn(move |_| {
-                for (chunk_row, output_pixels_row) in chunk.rows_mut().enumerate() {
+                for (chunk_row, output_pixels_row) in chunk.0.rows_mut().enumerate() {
                     let row = chunk_start_row + chunk_row;
                     let row_pixels = input_image_iter.row_f(&mut temp_row, row as _);
                     let bg_pixels = background.as_mut().map(|b| b.row_f(&mut temp_row, row as _)).unwrap_or(&[]);
@@ -302,7 +304,7 @@ fn dither_row(row_pixels: &[f_pixel], output_pixels_row: &mut [MaybeUninit<PalIn
         output_pixels_row[col].write(matched);
         let mut err = spx.0 - output_px.0;
         // This prevents weird green pixels popping out of the blue (or red or black! ;)
-        if err.r * err.r + err.g * err.g + err.b * err.b + err.a * err.a > max_dither_error {
+        if err.r.mul_add(err.r, err.g * err.g) + err.b.mul_add(err.b, err.a * err.a) > max_dither_error {
             err *= 0.75;
         }
         if even_row {

@@ -255,7 +255,7 @@ impl PalF {
     }
 
     // this is max colors allowed by the user, not just max in the current (candidate/low-quality) palette
-    pub(crate) fn with_fixed_colors(mut self, max_colors: PalLen, fixed_colors: &[f_pixel]) -> PalF {
+    pub(crate) fn with_fixed_colors(mut self, max_colors: PalLen, fixed_colors: &[f_pixel]) -> Self {
         if fixed_colors.is_empty() {
             return self;
         }
@@ -345,6 +345,7 @@ pub fn gamma_lut(gamma: f64) -> [f32; 256] {
 /// Not used in the Rust API.
 /// RGBA colors obtained from [`QuantizationResult`](crate::QuantizationResult)
 #[repr(C)]
+#[derive(Clone)]
 pub struct Palette {
     /// Number of used colors in the `entries`
     pub count: std::os::raw::c_uint,

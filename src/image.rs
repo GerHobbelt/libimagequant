@@ -4,7 +4,6 @@ use crate::error::*;
 use crate::pal::{f_pixel, PalF, PalIndexRemap, MAX_COLORS, MIN_OPAQUE_A, RGBA};
 use crate::remap::DitherMapMode;
 use crate::rows::{DynamicRows, PixelsSource};
-use crate::seacow::Pointer;
 use crate::seacow::RowBitmap;
 use crate::seacow::SeaCow;
 use crate::PushInCapacity;
@@ -17,6 +16,7 @@ use std::mem::MaybeUninit;
 /// Create one using [`Attributes::new_image()`].
 ///
 /// All images are internally in the RGBA format.
+#[derive(Clone)]
 pub struct Image<'pixels> {
     pub(crate) px: DynamicRows<'pixels, 'pixels>,
     pub(crate) importance_map: Option<Box<[u8]>>,
@@ -67,7 +67,9 @@ impl<'pixels> Image<'pixels> {
     /// This function is marked as unsafe, because the callback function MUST initialize the entire row (call `write` on every `MaybeUninit` pixel).
     ///
     pub unsafe fn new_fn<F: 'pixels + Fn(&mut [MaybeUninit<RGBA>], usize) + Send + Sync>(attr: &Attributes, convert_row_fn: F, width: usize, height: usize, gamma: f64) -> Result<Self, Error> {
-        Image::new_internal(attr, PixelsSource::Callback(Box::new(convert_row_fn)), width as u32, height as u32, gamma)
+        let width = width.try_into().map_err(|_| ValueOutOfRange)?;
+        let height = height.try_into().map_err(|_| ValueOutOfRange)?;
+        Image::new_internal(attr, PixelsSource::Callback(Box::new(convert_row_fn)), width, height, gamma)
     }
 
     pub(crate) fn free_histogram_inputs(&mut self) {
@@ -191,7 +193,7 @@ impl<'pixels> Image<'pixels> {
     /// Pixels that match the background color will be made transparent if there's a fully transparent color available in the palette.
     ///
     /// The background image's pixels must outlive this image.
-    pub fn set_background(&mut self, background: Image<'pixels>) -> Result<(), Error> {
+    pub fn set_background(&mut self, background: Self) -> Result<(), Error> {
         if background.background.is_some() {
             return Err(Unsupported);
         }
@@ -280,12 +282,12 @@ impl<'pixels> Image<'pixels> {
                 let horiz = horiz.a.max(horiz.r).max(horiz.g.max(horiz.b));
                 let vert = vert.a.max(vert.r).max(vert.g.max(vert.b));
                 let edge = horiz.max(vert);
-                let mut z = edge - (horiz - vert).abs() * 0.5;
+                let mut z = (horiz - vert).abs().mul_add(-0.5, edge);
                 z = 1. - z.max(horiz.min(vert));
                 z *= z;
                 z *= z;
                 // 85 is about 1/3rd of weight (not 0, because noisy pixels still need to be included, just not as precisely).
-                noise_row[i] = (80. + z * 176.) as u8;
+                noise_row[i] = z.mul_add(176., 80.) as u8;
                 edges_row[i] = ((1. - edge) * 256.) as u8;
             }
         }
@@ -325,14 +327,19 @@ impl<'pixels> Image<'pixels> {
     }
 
     fn new_stride_internal<'a>(attr: &Attributes, pixels: SeaCow<'a, RGBA>, width: usize, height: usize, stride: usize, gamma: f64) -> Result<Image<'a>, Error> {
-        let slice = pixels.as_slice();
-        if slice.len() < (stride * height + width - stride) {
-            attr.verbose_print(format!("Buffer length is {} bytes, which is not enough for {}×{}×4 RGBA bytes", slice.len()*4, stride, height));
-            return Err(BufferTooSmall);
-        }
+        let width = width.try_into().map_err(|_| ValueOutOfRange)?;
+        let height = height.try_into().map_err(|_| ValueOutOfRange)?;
+        let stride = stride.try_into().map_err(|_| ValueOutOfRange)?;
 
-        let rows = SeaCow::boxed(slice.chunks(stride).map(|row| Pointer(row.as_ptr())).take(height).collect());
-        Image::new_internal(attr, PixelsSource::Pixels { rows, pixels: Some(pixels) }, width as u32, height as u32, gamma)
+        let pixels_len = pixels.as_slice().len();
+        let pixels_rows = match PixelsSource::for_pixels(pixels, width, height, stride) {
+            Ok(p) => p,
+            Err(e) => {
+                attr.verbose_print(format!("Buffer length is {} bytes, which is not enough for {}×{}×4 RGBA bytes", pixels_len*4, stride, height));
+                return Err(e)
+            },
+        };
+        Image::new_internal(attr, pixels_rows, width, height, gamma)
     }
 }
 

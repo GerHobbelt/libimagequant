@@ -17,12 +17,64 @@ pub(crate) enum PixelsSource<'pixels, 'rows> {
     Callback(Box<RowCallback<'rows>>),
 }
 
+impl<'pixels, 'rows> PixelsSource<'pixels, 'rows> {
+    pub(crate) fn for_pixels(pixels: SeaCow<'pixels, RGBA>, width: u32, height: u32, stride: u32) -> Result<Self, Error> {
+        if stride < width || height == 0 || width == 0 {
+            return Err(Error::ValueOutOfRange);
+        }
+        let stride = stride as usize;
+        let width = width as usize;
+        let height = height as usize;
+
+        let slice = pixels.as_slice();
+        let min_area = stride.checked_mul(height).and_then(|a| a.checked_add(width)).ok_or(Error::ValueOutOfRange)? - stride;
+        if slice.len() < min_area {
+            return Err(Error::BufferTooSmall);
+        }
+
+        let rows = SeaCow::boxed(slice.chunks(stride).map(|row| Pointer(row.as_ptr())).take(height).collect());
+        Ok(Self::Pixels { rows, pixels: Some(pixels) })
+    }
+}
+
 pub(crate) struct DynamicRows<'pixels, 'rows> {
     pub(crate) width: u32,
     pub(crate) height: u32,
     f_pixels: Option<Box<[f_pixel]>>,
     pixels: PixelsSource<'pixels, 'rows>,
     pub(crate) gamma: f64,
+}
+
+impl Clone for DynamicRows<'_, '_> {
+    fn clone(&self) -> Self {
+        Self {
+            width: self.width,
+            height: self.height,
+            f_pixels: self.f_pixels.clone(),
+            pixels: match &self.pixels {
+                PixelsSource::Pixels { rows, pixels } => {
+                    PixelsSource::Pixels {
+                        rows: rows.clone(),
+                        pixels: pixels.clone(),
+                    }
+                },
+                PixelsSource::Callback(_) => {
+                    let area = self.width as usize * self.height as usize;
+                    let mut out = Vec::with_capacity(area);
+                    let out_rows = out.spare_capacity_mut()[..area].chunks_exact_mut(self.width as usize);
+                    for (i, row) in out_rows.enumerate() {
+                        self.row_rgba(row, i);
+                    }
+                    unsafe {
+                        out.set_len(area);
+                    }
+                    let pixels = SeaCow::boxed(out.into_boxed_slice());
+                    PixelsSource::for_pixels(pixels, self.width, self.height, self.width).unwrap()
+                }
+            },
+            gamma: self.gamma,
+        }
+    }
 }
 
 pub(crate) struct DynamicRowsIter<'parent, 'pixels, 'rows> {
