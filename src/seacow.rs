@@ -29,9 +29,7 @@ impl<T> SeaCow<'static, T> {
     #[inline]
     #[must_use]
     pub fn boxed(data: Box<[T]>) -> Self {
-        Self {
-            inner: SeaCowInner::Boxed(data),
-        }
+        Self { inner: SeaCowInner::Boxed(data) }
     }
 }
 
@@ -39,9 +37,7 @@ impl<'a, T> SeaCow<'a, T> {
     #[inline]
     #[must_use]
     pub fn borrowed(data: &'a [T]) -> Self {
-        Self {
-            inner: SeaCowInner::Borrowed(data),
-        }
+        Self { inner: SeaCowInner::Borrowed(data) }
     }
 
     /// The pointer must be `malloc`-allocated
@@ -61,7 +57,7 @@ impl<'a, T> SeaCow<'a, T> {
     #[cfg(feature = "_internal_c_ffi")]
     pub(crate) fn make_owned(&mut self, free_fn: unsafe extern fn(*mut c_void)) {
         if let SeaCowInner::Borrowed(slice) = self.inner {
-            self.inner = SeaCowInner::Owned { ptr: slice.as_ptr() as *mut _, len: slice.len(), free_fn };
+            self.inner = SeaCowInner::Owned { ptr: slice.as_ptr().cast_mut(), len: slice.len(), free_fn };
         }
     }
 }
@@ -187,7 +183,7 @@ impl<'a, T: Sync + Send + Copy + 'static> RowBitmapMut<'a, T> {
         })
     }
 
-    pub(crate) fn chunks(&mut self, chunk_size: usize) -> impl Iterator<Item=RowBitmapMut<'_, T>> {
+    pub(crate) fn chunks(&mut self, chunk_size: usize) -> impl Iterator<Item = RowBitmapMut<'_, T>> {
         self.rows.borrow_mut().chunks_mut(chunk_size).map(|chunk| RowBitmapMut {
             width: self.width,
             rows: MutCow::Borrowed(chunk),

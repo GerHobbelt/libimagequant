@@ -1,4 +1,3 @@
-use crate::CacheLineAlign;
 use crate::error::Error;
 use crate::image::Image;
 use crate::kmeans::Kmeans;
@@ -8,6 +7,7 @@ use crate::quant::QuantizationResult;
 use crate::rayoff::*;
 use crate::rows::{temp_buf, DynamicRows};
 use crate::seacow::{RowBitmap, RowBitmapMut};
+use crate::CacheLineAlign;
 use std::cell::RefCell;
 use std::mem::MaybeUninit;
 
@@ -57,10 +57,7 @@ pub(crate) fn remap_to_palette<'x, 'b: 'x>(px: &mut DynamicRows, background: Opt
 
     let remapping_error = output_pixels.rows_mut().enumerate().par_bridge().map(|(row, output_pixels_row)| {
         let mut remapping_error = 0.;
-        let tls_res = match tls.get_or_try(per_thread_buffers) {
-            Ok(res) => res,
-            Err(_) => return f64::NAN,
-        };
+        let Ok(tls_res) = tls.get_or_try(per_thread_buffers) else { return f64::NAN };
         let (kmeans, temp_row, temp_row_f, temp_row_f_bg) = &mut *tls_res.0.borrow_mut();
 
         let output_pixels_row = &mut output_pixels_row[..width];
@@ -268,7 +265,7 @@ fn dither_row(row_pixels: &[f_pixel], output_pixels_row: &mut [MaybeUninit<PalIn
             last_match
         };
         let (matched, dither_diff) = n.search(&spx, guessed_match as _);
-        let mut matched = matched  as PalIndexRemap;
+        let mut matched = matched as PalIndexRemap;
         last_match = matched as PalIndexRemap;
         let mut output_px = palette[last_match as usize];
         if let Some(bg_pixel) = bg_pixels.get(col) {

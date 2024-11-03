@@ -1,13 +1,13 @@
 use crate::OrdFloat;
 use arrayvec::ArrayVec;
-use rgb::ComponentMap;
+use rgb::prelude::*;
 use std::ops::{Deref, DerefMut};
 
 /// 8-bit RGBA in sRGB. This is the only color format *publicly* used by the library.
-pub type RGBA = rgb::RGBA<u8>;
+pub type RGBA = rgb::Rgba<u8>;
 
 #[allow(clippy::upper_case_acronyms)]
-pub type ARGBF = rgb::alt::ARGB<f32>;
+pub type ARGBF = rgb::Argb<f32>;
 
 pub const INTERNAL_GAMMA: f64 = 0.57;
 pub const LIQ_WEIGHT_A: f32 = 0.625;
@@ -78,7 +78,7 @@ impl f_pixel {
             vst1q_f32(max_gb.as_mut_ptr(), vpaddq_f32(max, max));
 
             // add rgb, not a
-            
+
             max_r[1] + max_gb[1]
         }
     }
@@ -228,8 +228,8 @@ impl PalF {
         debug_assert!(PalIndex::MAX as usize + 1 >= MAX_COLORS);
         debug_assert!(PalLen::MAX as usize >= MAX_COLORS);
         Self {
-            colors: Default::default(),
-            pops: Default::default(),
+            colors: ArrayVec::default(),
+            pops: ArrayVec::default(),
         }
     }
 
