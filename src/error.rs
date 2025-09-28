@@ -1,5 +1,5 @@
+use core::{error, fmt};
 use std::collections::TryReserveError;
-use std::fmt;
 pub use Error::*;
 
 /// Error codes
@@ -29,7 +29,7 @@ pub enum Error {
     Unsupported,
 }
 
-impl std::error::Error for Error {}
+impl error::Error for Error {}
 
 impl fmt::Display for Error {
     #[cold]
@@ -46,6 +46,12 @@ impl fmt::Display for Error {
             Self::InvalidPointer => "INVALID_POINTER",
             Self::Unsupported => "UNSUPPORTED",
         })
+    }
+}
+
+impl From<core::convert::Infallible> for Error {
+    fn from(e: core::convert::Infallible) -> Self {
+        match e {}
     }
 }
 

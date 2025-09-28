@@ -1,7 +1,8 @@
 use crate::OrdFloat;
 use arrayvec::ArrayVec;
+use core::iter;
+use core::ops::{Deref, DerefMut};
 use rgb::prelude::*;
-use std::ops::{Deref, DerefMut};
 
 /// 8-bit RGBA in sRGB. This is the only color format *publicly* used by the library.
 pub type RGBA = rgb::Rgba<u8>;
@@ -9,17 +10,14 @@ pub type RGBA = rgb::Rgba<u8>;
 #[allow(clippy::upper_case_acronyms)]
 pub type ARGBF = rgb::Argb<f32>;
 
-pub const INTERNAL_GAMMA: f64 = 0.57;
-pub const LIQ_WEIGHT_A: f32 = 0.625;
-pub const LIQ_WEIGHT_R: f32 = 0.5;
-pub const LIQ_WEIGHT_G: f32 = 1.;
-pub const LIQ_WEIGHT_B: f32 = 0.45;
+const INTERNAL_GAMMA: f64 = 0.57;
+const LIQ_WEIGHT_A: f32 = 0.625;
+const LIQ_WEIGHT_R: f32 = 0.5;
+const LIQ_WEIGHT_G: f32 = 1.;
+const LIQ_WEIGHT_B: f32 = 0.45;
 
 /// This is a fudge factor - reminder that colors are not in 0..1 range any more
-pub const LIQ_WEIGHT_MSE: f64 = 0.45;
-
-pub const MIN_OPAQUE_A: f32 = 1. / 256. * LIQ_WEIGHT_A;
-pub const MAX_TRANSP_A: f32 = 255. / 256. * LIQ_WEIGHT_A;
+const LIQ_WEIGHT_MSE: f64 = 0.45;
 
 /// 4xf32 color using internal gamma.
 ///
@@ -54,7 +52,7 @@ impl f_pixel {
     #[inline(always)]
     pub fn diff(&self, other: &Self) -> f32 {
         unsafe {
-            use std::arch::aarch64::*;
+            use core::arch::aarch64::*;
 
             let px = vld1q_f32((self as *const Self).cast::<f32>());
             let py = vld1q_f32((other as *const Self).cast::<f32>());
@@ -87,7 +85,7 @@ impl f_pixel {
     #[inline(always)]
     pub fn diff(&self, other: &f_pixel) -> f32 {
         unsafe {
-            use std::arch::x86_64::*;
+            use core::arch::x86_64::*;
 
             let px = _mm_loadu_ps(self as *const f_pixel as *const f32);
             let py = _mm_loadu_ps(other as *const f_pixel as *const f32);
@@ -115,14 +113,13 @@ impl f_pixel {
 
     #[inline]
     pub(crate) fn to_rgb(self, gamma: f64) -> RGBA {
-        if self.a < MIN_OPAQUE_A {
+        if self.is_fully_transparent() {
             return RGBA::new(0, 0, 0, 0);
         }
 
-        let r = (LIQ_WEIGHT_A / LIQ_WEIGHT_R) * self.r / self.a;
-        let g = (LIQ_WEIGHT_A / LIQ_WEIGHT_G) * self.g / self.a;
-        let b = (LIQ_WEIGHT_A / LIQ_WEIGHT_B) * self.b / self.a;
-        let a = (256. / LIQ_WEIGHT_A) * self.a;
+        let r = (f64::from(LIQ_WEIGHT_A) / f64::from(LIQ_WEIGHT_R)) as f32 * self.r / self.a;
+        let g = (f64::from(LIQ_WEIGHT_A) / f64::from(LIQ_WEIGHT_G)) as f32 * self.g / self.a;
+        let b = (f64::from(LIQ_WEIGHT_A) / f64::from(LIQ_WEIGHT_B)) as f32 * self.b / self.a;
 
         let gamma = (gamma / INTERNAL_GAMMA) as f32;
         debug_assert!(gamma.is_finite());
@@ -132,7 +129,7 @@ impl f_pixel {
             r: (r.powf(gamma) * 256.) as u8,
             g: (g.powf(gamma) * 256.) as u8,
             b: (b.powf(gamma) * 256.) as u8,
-            a: a as u8,
+            a: (self.a * (256. / f64::from(LIQ_WEIGHT_A)) as f32) as u8,
         }
     }
 
@@ -144,6 +141,16 @@ impl f_pixel {
             g: gamma_lut[px.g as usize] * LIQ_WEIGHT_G * a,
             b: gamma_lut[px.b as usize] * LIQ_WEIGHT_B * a,
         })
+    }
+
+    #[inline]
+    pub(crate) fn is_fully_transparent(self) -> bool {
+        self.a < (1. / 255. * f64::from(LIQ_WEIGHT_A)) as f32
+    }
+
+    #[inline]
+    pub(crate) fn is_fully_opaque(self) -> bool {
+        self.a >= (255. / 256. * f64::from(LIQ_WEIGHT_A)) as f32
     }
 }
 
@@ -271,7 +278,7 @@ impl PalF {
         if self.len() < max_fixed_colors {
             let needs_extra = max_fixed_colors - self.len();
             self.colors.extend(fixed_colors.iter().copied().take(needs_extra));
-            self.pops.extend(std::iter::repeat(PalPop::new(0.)).take(needs_extra));
+            self.pops.extend(iter::repeat(PalPop::new(0.)).take(needs_extra));
             debug_assert_eq!(self.len(), max_fixed_colors);
         }
 
@@ -348,18 +355,29 @@ pub fn gamma_lut(gamma: f64) -> [f32; 256] {
     tmp
 }
 
+/// MSE that assumes 0..1 channels scaled to MSE that we have in practice
+#[inline]
+pub(crate) fn unit_mse_to_internal_mse(internal_mse: f64) -> f64 {
+    LIQ_WEIGHT_MSE * internal_mse
+}
+
+/// Internal MSE scaled to equivalent in 0..255 pixels
+pub(crate) fn internal_mse_to_standard_mse(mse: f64) -> f64 {
+    (mse * 65536. / 6.) / LIQ_WEIGHT_MSE
+}
+
 /// Not used in the Rust API.
 /// RGBA colors obtained from [`QuantizationResult`](crate::QuantizationResult)
 #[repr(C)]
 #[derive(Clone)]
 pub struct Palette {
     /// Number of used colors in the `entries`
-    pub count: std::os::raw::c_uint,
+    pub count: core::ffi::c_uint,
     /// The colors, up to `count`
     pub entries: [RGBA; MAX_COLORS],
 }
 
-impl std::ops::Deref for Palette {
+impl Deref for Palette {
     type Target = [RGBA];
 
     #[inline(always)]
@@ -368,7 +386,7 @@ impl std::ops::Deref for Palette {
     }
 }
 
-impl std::ops::DerefMut for Palette {
+impl DerefMut for Palette {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.as_mut_slice()
@@ -411,6 +429,28 @@ fn diff_test() {
     let d = f_pixel(ARGBF {a: 0., g: 1., b: 0.3, r: 0.5});
     assert!(a.diff(&b) < b.diff(&c));
     assert!(c.diff(&b) < c.diff(&d));
+}
+
+#[test]
+fn alpha_test() {
+    let gamma = gamma_lut(0.45455);
+    for (start, end) in [
+        (RGBA::new(0,0,0,0), RGBA::new(0,0,0,2)),
+        (RGBA::new(0,0,0,253), RGBA::new(0,0,0,255))
+    ] {
+        let start = f_pixel::from_rgba(&gamma, start).a as f64;
+        let end = f_pixel::from_rgba(&gamma, end).a as f64;
+        let range = end - start;
+        for i in 0..1000 {
+            let a = (start + ((i as f64) / 1000. * range)) as f32;
+            for a in [a, a.next_up(), a.next_down(), a+1e-6, a-1e-6] {
+                let px = f_pixel(ARGBF {a, g: 0., b: 0., r: 0.});
+                let rgb = px.to_rgb(0.45455);
+                assert_eq!(rgb.a == 0, px.is_fully_transparent(), "not trns!? {px:?}, {rgb:?} {} {}", a / LIQ_WEIGHT_A, a / LIQ_WEIGHT_A * 255.);
+                assert_eq!(rgb.a == 255, px.is_fully_opaque(), "not opaque?! {px:?}, {rgb:?} {} {} {}", a / LIQ_WEIGHT_A, a / LIQ_WEIGHT_A * 255., a / LIQ_WEIGHT_A * 256.);
+            }
+        }
+    }
 }
 
 #[test]
