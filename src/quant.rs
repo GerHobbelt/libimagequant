@@ -1,12 +1,11 @@
 use crate::attr::{Attributes, ControlFlow};
 use crate::error::*;
-use crate::hist::HistogramInternal;
+use crate::hist::{HistogramInternal, Histogram};
 use crate::image::Image;
 use crate::kmeans::Kmeans;
 use crate::mediancut::mediancut;
-use crate::pal::{PalIndexRemap, PalF, PalLen, PalPop, Palette, LIQ_WEIGHT_MSE, MAX_COLORS, MAX_TRANSP_A, RGBA};
-use crate::remap::{mse_to_standard_mse, DitherMapMode, Remapped};
-use crate::remap::{remap_to_palette, remap_to_palette_floyd};
+use crate::pal::{PalF, PalIndexRemap, PalLen, PalPop, Palette, LIQ_WEIGHT_MSE, MAX_COLORS, MAX_TRANSP_A, RGBA};
+use crate::remap::{mse_to_standard_mse, remap_to_palette, remap_to_palette_floyd, DitherMapMode, Remapped};
 use crate::seacow::RowBitmapMut;
 use crate::OrdFloat;
 use arrayvec::ArrayVec;
@@ -289,6 +288,26 @@ impl QuantizationResult {
     pub fn palette_len(&mut self) -> usize {
         self.palette.len()
     }
+
+    /// Shortcut for making [`Histogram`] with `add_fixed_color`
+    ///
+    /// Set `gamma` to `0.` for sRGB colors.
+    pub fn from_palette(attr: &Attributes, palette: &[RGBA], gamma: f64) -> Result<Self, Error> {
+        if palette.len() > MAX_COLORS {
+            return Err(Unsupported);
+        }
+
+        let mut hist = Histogram::new(attr);
+        for &c in palette {
+            hist.add_fixed_color(c, gamma)?;
+        }
+        hist.quantize(attr)
+    }
+
+    /// Getter for the value set in [`set_dithering_level`]
+    pub fn dithering_level(&self) -> f32 {
+        self.dither_level
+    }
 }
 
 impl Clone for QuantizationResult {
@@ -455,7 +474,7 @@ pub(crate) fn quality_to_mse(quality: u8) -> f64 {
 
 pub(crate) fn mse_to_quality(mse: f64) -> u8 {
     for i in (1..101).rev() {
-        if mse <= quality_to_mse(i) + 0.000001 { return i; };
+        if mse <= quality_to_mse(i) + 0.000001 { return i; }
     }
     0
 }
