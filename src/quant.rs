@@ -14,6 +14,9 @@ use core::cmp::Reverse;
 use core::fmt;
 use core::mem::MaybeUninit;
 
+#[cfg(all(not(feature = "std"), feature = "no_std"))]
+use crate::no_std_compat::*;
+
 /// Remapping step, computed from [`Attributes::quantize()`]
 pub struct QuantizationResult {
     remapped: Option<Box<Remapped>>,
@@ -305,7 +308,7 @@ impl QuantizationResult {
         hist.quantize(attr)
     }
 
-    /// Getter for the value set in [`set_dithering_level`]
+    /// Getter for the value set in [`Self::set_dithering_level`]
     #[must_use]
     pub fn dithering_level(&self) -> f32 {
         self.dither_level
